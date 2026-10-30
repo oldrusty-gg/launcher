@@ -1,0 +1,58 @@
+{
+  "contract": 1,
+  "id": "roses",
+  "name": "Yu-Gi-Oh! The Duelists of the Roses",
+  "version": "0.1.0",
+  "hero": "DUELISTS OF THE ROSES",
+  "subtitle": "Yu-Gi-Oh!  ·  PAL",
+  "notice": "Duelists of the Roses is in beta. You will encounter bugs and missing pieces.",
+  "discs": [
+    { "label": "PAL (Europe)", "serial": "SLES-51579" }
+  ],
+  "importer": {
+    "program": "roses.exe",
+    "args": ["import-game", "--iso", "{iso}", "--out", "{import_dir}"],
+    "import_prefix": "game-",
+    "complete_marker": "game.json",
+    "progress": "steps",
+    "verify": { "args": ["verify-import", "--import", "{import_dir}"] },
+    "check": { "args": ["verify-import", "--data-root", "{data_dir}"] }
+  },
+  "executable": {
+    "program": "roses-bevy-scene.exe",
+    "args": ["--game", "{marker}"],
+    "dev_options": ["--research-root"]
+  },
+  "launch_toggle": {
+    "id": "extras",
+    "label": "Online Play and extras",
+    "default": true,
+    "args_off": ["--faithful"]
+  },
+  "data_dir": ".",
+  "online": {
+    "config_file": "online.json",
+    "audience": "roses",
+    "account_hello": {
+      "compat": { "protocol": 4, "rules_profile": "dotr-pal-original-online-2", "duel_schema": "roses-duel-1", "data_fingerprint": "", "mods": [] }
+    }
+  },
+  "art": {
+    "initials": "DotR",
+    "backdrop": "story/textures/texetc-00.png",
+    "logo": [24, 30, 592, 276]
+  },
+  "texts": {
+    "import_needed": "Not imported yet. You need your own PAL ISO of the game (SLES-51579).",
+    "saves": "Nothing is saved automatically: on the campaign map choose SYSTEM → SAVE; Continue on the title screen loads it.",
+    "controls": "Xbox, DualSense and DualShock 4 pads work directly (USB or Bluetooth), buttons in the PS2 layout by position. Keyboard: arrows = D-pad · X Cross · Z Circle · A Square · D Triangle · S Start · Tab Select · Q/E = L1/R1 · 1/W = L2/R2.",
+    "running": "The game is running. Save on the campaign map with SYSTEM → SAVE.",
+    "ready": "Save on the campaign map with SYSTEM → SAVE; Continue on the title screen loads it."
+  },
+  "links": {
+    "issues": null,
+    "known_issues": null,
+    "releases": null,
+    "website": null
+  }
+}

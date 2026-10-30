@@ -1,0 +1,27 @@
+[workspace]
+members = ["crates/roses-launcher"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+png = "0.18"
+
+
+# The video recorder scales and converts 1080p frames every frame.
+[profile.dev.package.platform-video]
+opt-level = 3
+
+# Argon2id at the server's cost takes seconds unoptimised; keep sign-ins
+# quick in dev builds of the friends-online hub.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
