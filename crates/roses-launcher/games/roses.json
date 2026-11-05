@@ -50,9 +50,9 @@
     "ready": "Save on the campaign map with SYSTEM → SAVE; Continue on the title screen loads it."
   },
   "links": {
-    "issues": null,
-    "known_issues": null,
-    "releases": null,
-    "website": null
+    "issues": "https://github.com/oldrusty-gg/rust-yugi-dotr/issues",
+    "known_issues": "https://github.com/oldrusty-gg/rust-yugi-dotr/blob/main/scripts/release/KNOWN-ISSUES.txt",
+    "releases": "https://github.com/oldrusty-gg/rust-yugi-dotr/releases",
+    "website": "https://oldrusty.gg/duelists-of-the-roses"
   }
 }

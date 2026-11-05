@@ -18,6 +18,13 @@ fn main() {
     let path = out.join("roses-launcher-icon.res");
     std::fs::write(&path, icon_res()).expect("write icon resource");
     println!("cargo:rustc-link-arg-bins={}", path.display());
+    // The video recorder's Media Foundation DLLs load on first use, so
+    // Windows N without the Media Feature Pack still starts the launcher
+    // (scripts/release/audit.py checks this).
+    for dll in ["mfplat.dll", "mfreadwrite.dll"] {
+        println!("cargo:rustc-link-arg-bins=/DELAYLOAD:{dll}");
+    }
+    println!("cargo:rustc-link-arg-bins=delayimp.lib");
 }
 
 fn push_u16(out: &mut Vec<u8>, v: u16) {

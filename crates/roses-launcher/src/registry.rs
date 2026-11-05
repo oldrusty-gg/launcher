@@ -397,13 +397,8 @@ pub fn import(game: &Game, iso: &Path, extra: &[OsString], events: &Sender<Event
     let stderr = err_result.map_err(|error| format!("Could not read importer errors: {error}"))?;
     let status = status?;
     if !status.success() {
-        return Err(format!(
-            "Import failed ({}).\n{}\nAny partial output remains at {}. Your source {} was not modified.",
-            status.code().map_or_else(|| "process terminated".into(), |code| format!("exit {code}")),
-            stderr.trim(),
-            output.display(),
-            disc.noun()
-        ));
+        let code = status.code().map_or_else(|| "process terminated".into(), |code| format!("exit {code}"));
+        return Err(import_failure(&code, &stderr, output.exists().then_some(output.as_path()), disc.noun()));
     }
     let marker = output.join(&game.manifest.importer.complete_marker);
     if !marker.is_file() {
@@ -417,6 +412,23 @@ pub fn import(game: &Game, iso: &Path, extra: &[OsString], events: &Sender<Event
         None
     };
     Ok(Imported { marker, verified })
+}
+
+/// What the player reads when the importer fails. A disc it refuses gets its
+/// one plain line (nothing else in the log means anything to a player); the
+/// partial-output note only appears when there is a folder to speak of.
+fn import_failure(code: &str, stderr: &str, partial: Option<&Path>, noun: &str) -> String {
+    let refused = stderr.lines().find_map(|line| {
+        let line = line.trim();
+        line.ends_with("can't be imported.").then(|| line.strip_prefix("roses: ").unwrap_or(line))
+    });
+    let unchanged = format!("Your source {noun} was not modified.");
+    match (refused, partial) {
+        (Some(reason), None) => format!("{reason}\n{unchanged}"),
+        (Some(reason), Some(dir)) => format!("{reason}\nAny partial output remains at {}. {unchanged}", dir.display()),
+        (None, None) => format!("Import failed ({code}).\n{}\n{unchanged}", stderr.trim()),
+        (None, Some(dir)) => format!("Import failed ({code}).\n{}\nAny partial output remains at {}. {unchanged}", stderr.trim(), dir.display()),
+    }
 }
 
 /// The accepted disc files for texts: ".iso", ".cue or .bin".
@@ -778,5 +790,18 @@ mod tests {
         assert_eq!(Platform::load(&dir).0, Platform::default());
         assert!(open_link("file:///C:/Windows/notepad.exe").is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_disc_reads_as_one_plain_line() {
+        let stderr = "Verifying the complete PAL ISO fingerprint…\nroses: This disc image doesn't match the supported PAL release (SLES_515.79). Modified or other-region images can't be imported.\n";
+        assert_eq!(
+            import_failure("exit 2", stderr, None, "disc image"),
+            "This disc image doesn't match the supported PAL release (SLES_515.79). Modified or other-region images can't be imported.\nYour source disc image was not modified."
+        );
+        // Any other failure keeps the importer's words and the partial folder.
+        let other = import_failure("exit 2", "roses: out of disk space\n", Some(Path::new("data")), "disc image");
+        assert!(other.starts_with("Import failed (exit 2).\nroses: out of disk space\n"), "{other}");
+        assert!(other.contains("Any partial output remains at data."), "{other}");
     }
 }
