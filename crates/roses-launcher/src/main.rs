@@ -13,6 +13,13 @@ mod windows;
 
 #[cfg(windows)]
 fn main() {
+    // The update helper: a copy of this exe, no window (updater::swap).
+    if let Some((install, version, data_root)) = roses_launcher::updater::swap::helper_args() {
+        if let Err(error) = roses_launcher::updater::swap::run_helper(&install, &version, &data_root) {
+            windows::show_error(&error);
+        }
+        return;
+    }
     if let Err(error) = windows::run() {
         windows::show_error(&error);
     }

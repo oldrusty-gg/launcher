@@ -18,6 +18,17 @@ platform-sdk = { path = "../../../platform-sdk/crates/platform-sdk" }
 platform-net = { path = "../../../platform-sdk/crates/platform-net" }
 # ROSES_LAUNCHER_RECORD (videos; a tool): the MP4 writer.
 platform-video = { path = "../../../platform-sdk/crates/platform-video" }
+# One-click updates (src/updater.rs). All three are already in the workspace:
+# rustls is platform-net's TLS (the same version and features, named here for
+# its stream types), sha2 the release checksum, zip the release package.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+sha2.workspace = true
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+
+[features]
+# Tests only, never in a release: lets the updater fetch http://127.0.0.1 and
+# reads the ROSES_UPDATE_TEST_* variables (tests/update_e2e.rs).
+update-test-seam = []
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_Graphics_Dwm", "Win32_UI_Controls_Dialogs", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_XboxController", "Win32_UI_WindowsAndMessaging"] }

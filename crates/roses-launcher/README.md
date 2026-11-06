@@ -146,9 +146,12 @@ default. `ROSES_LAUNCHER_GAME=<id>` shows that game first (for
 `platform.json` beside the exe (optional) sets the platform's name (a
 brand, "oldrusty" when unset; the header draws it as the wordmark
 `[oldrusty]`) and its links:
-`{"name": "...", "launcher_releases": "https://...", "launcher_issues": "https://...", "website": "https://..."}`.
+`{"name": "...", "launcher_releases": "https://...", "launcher_update_api": "https://api.github.com/...", "launcher_issues": "https://...", "website": "https://..."}`.
 The title bar shows the launcher's and the shown game's versions and a
-"Get the latest launcher" link; Known issues and Report a problem use the
+"Get the latest launcher" link, which becomes an Update button when
+`launcher_update_api`'s latest release is newer than `ROSES_RELEASE` and
+carries `latest.json` (`src/updater.rs` has the whole flow; a development
+build never checks). Known issues and Report a problem use the
 game's manifest `links` (https only, opened in the system browser) and
 fall back to `KNOWN-ISSUES.txt` and the logs folder until they are set.
 

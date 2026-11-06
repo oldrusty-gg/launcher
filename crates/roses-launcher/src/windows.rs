@@ -10,6 +10,7 @@
 use crate::canvas::{self, mix, rgb, Rgba, Surface};
 use crate::pad::{self, Action, Dir, Target};
 use roses_launcher::registry::{Game, Platform};
+use roses_launcher::updater::{self, swap, Available, Check, UpdateEvent};
 use roses_launcher::{Event, LauncherState, Options, Verified};
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -500,6 +501,29 @@ struct App {
     /// focused: its window is never shown, so it has no keyboard focus).
     pad_focus: Option<usize>,
     pad_clock: Instant,
+    update: Update,
+    update_sender: Sender<UpdateEvent>,
+    update_receiver: Receiver<UpdateEvent>,
+    /// What the updater last said (and whether it is an error): shown in
+    /// place of the game's status until the next Play or Import.
+    update_notice: Option<(String, bool)>,
+}
+
+/// The header's update control ([`UPDATE`]).
+enum Update {
+    /// Today's link to the release page: still checking, nothing newer, a
+    /// release without `latest.json`, or the check failed.
+    Link,
+    /// The Update button.
+    Offered(Available),
+    /// Downloading or unpacking; `percent` of the download.
+    Working { available: Available, percent: u32 },
+}
+
+impl Update {
+    fn working(&self) -> bool {
+        matches!(self, Update::Working { .. })
+    }
 }
 
 /// The capture variable ([`App::capture`]).
@@ -550,6 +574,7 @@ pub fn run() -> Result<(), String> {
     let config = paths.load_config();
     let user = config.as_ref().ok().and_then(|c| paths.saved(c)).map(|s| s.username);
     let (profile_sender, profile_receiver) = mpsc::channel();
+    let (update_sender, update_receiver) = mpsc::channel();
     let mut app = Box::new(App {
         options,
         platform,
@@ -596,6 +621,10 @@ pub fn run() -> Result<(), String> {
         pad_input: pad::Input::default(),
         pad_focus: None,
         pad_clock: Instant::now(),
+        update: Update::Link,
+        update_sender,
+        update_receiver,
+        update_notice: None,
     });
     app.log_file =
         roses_launcher::start_log(&app.options.data_root, roses_launcher::LAUNCHER_LOG).ok();
@@ -698,9 +727,10 @@ pub fn run() -> Result<(), String> {
         if app.profile.config.is_ok() {
             profile_job(&mut app, roses_launcher::profile::Job::Check);
         }
+        start_update_check(&mut app);
         // Hide focus rectangles until the keyboard is used (Tab shows them).
         SendMessageW(hwnd, WM_CHANGEUISTATE, (UIS_SET as usize) | (((UISF_HIDEFOCUS | UISF_HIDEACCEL) as usize) << 16), 0);
-        if app.capture.is_none() && app.record.is_none() {
+        if app.capture.is_none() && app.record.is_none() && !updater::test_hidden() {
             app.pads = Some(pad::Pads::start());
             SetTimer(hwnd, PAD_TIMER, PAD_POLL_MS, None);
             ShowWindow(hwnd, SW_SHOW);
@@ -1115,7 +1145,12 @@ unsafe fn command(hwnd: HWND, state: *mut App, id: usize) {
             set_form(&mut *state, Form::LogIn)
         }
         2 => set_view(&mut *state, View::Game),
+        // Nothing may start a program while its file is about to be replaced.
+        IMPORT | S_REIMPORT | PLAY if (*state).update.working() => {
+            update_notice(&mut *state, "Please wait for the update to finish.", false);
+        }
         IMPORT if !(*state).slot.busy => {
+            (*state).update_notice = None;
             let iso = match (*state).slot.iso.clone() {
                 Some(iso) => Some(iso),
                 None => choose_iso(hwnd, (*state).game()),
@@ -1125,12 +1160,16 @@ unsafe fn command(hwnd: HWND, state: *mut App, id: usize) {
             }
         }
         S_REIMPORT if !(*state).slot.busy => {
+            (*state).update_notice = None;
             if let Some(iso) = choose_iso(hwnd, (*state).game()) {
                 set_view(&mut *state, View::Game);
                 start_import(&mut *state, iso);
             }
         }
-        PLAY if !(*state).slot.busy && (*state).slot.game_child.is_none() => play_game(&mut *state),
+        PLAY if !(*state).slot.busy && (*state).slot.game_child.is_none() => {
+            (*state).update_notice = None;
+            play_game(&mut *state)
+        }
         TOGGLE if (*state).slot.game_child.is_none() => flip_toggle(&mut *state),
         REPORT | BANNER_REPORT | S_LOGS => report_problem(&mut *state),
         SAVES | S_SAVES => {
@@ -1168,11 +1207,7 @@ unsafe fn command(hwnd: HWND, state: *mut App, id: usize) {
         P_EMAIL_SEND if !(*state).profile.busy => submit_email(&mut *state),
         P_EMAIL_VERIFY if !(*state).profile.busy => submit_code(&mut *state),
         P_EMAIL_LATER if !(*state).profile.busy => profile_job(&mut *state, roses_launcher::profile::Job::DismissEmailPrompt),
-        UPDATE => {
-            let app = &mut *state;
-            let url = app.platform.launcher_releases.clone();
-            open_configured(app, url.as_deref(), "The launcher's download page is not set up yet (platform.json: launcher_releases).");
-        }
+        UPDATE => update_clicked(hwnd, state),
         P_LOGOUT if !(*state).profile.busy => profile_job(&mut *state, roses_launcher::profile::Job::LogOut),
         P_SUBMIT if !(*state).profile.busy => submit_profile(&mut *state),
         HELP => open_beside_launcher(&mut *state, &["README.txt"]),
@@ -1201,6 +1236,172 @@ unsafe fn command(hwnd: HWND, state: *mut App, id: usize) {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
         _ => {}
+    }
+}
+
+/// The updater's message: logged and shown on the game page.
+unsafe fn update_notice(app: &mut App, text: &str, error: bool) {
+    append_log(app, &format!("Update: {text}\n"));
+    app.update_notice = Some((text.to_owned(), error));
+    if app.view != View::Game {
+        set_view(app, View::Game);
+    }
+    update_texts(app);
+}
+
+/// Show `text` on the update control.
+unsafe fn update_caption(app: &App, text: &str) {
+    set_text(app, UPDATE, text);
+    InvalidateRect(app.hwnd_of(UPDATE), null(), 0);
+}
+
+/// Report the last update, then ask GitHub in the background. Release builds
+/// only (a development build has no version to compare), and no network from
+/// screenshots and recordings.
+unsafe fn start_update_check(app: &mut App) {
+    let tool = app.capture.is_some() || app.record.is_some();
+    if tool && !cfg!(feature = "update-test-seam") {
+        return;
+    }
+    let Some(current) = roses_launcher::RELEASE else { return };
+    let install = app.options.launcher_dir.clone();
+    if let Some(outcome) = swap::finish_previous(&install) {
+        update_notice(app, &outcome.message, !outcome.ok);
+    }
+    let Some(url) = app.platform.launcher_update_api.clone() else {
+        swap::Staging::of(&install).remove();
+        return;
+    };
+    let sender = app.update_sender.clone();
+    std::thread::spawn(move || {
+        swap::Staging::of(&install).remove();
+        let result = std::panic::catch_unwind(|| updater::check(&url, current, &updater::Policy::for_build()))
+            .unwrap_or_else(|_| Err("The update check stopped unexpectedly.".into()));
+        let _ = sender.send(UpdateEvent::Checked(result));
+    });
+}
+
+/// Why an update cannot start now, in the player's words.
+fn update_blocked(app: &App) -> Option<String> {
+    if app.slot.game_child.is_some() || app.parked.iter().flatten().any(|s| s.game_child.is_some()) {
+        return Some("Close the game first, then click Update.".into());
+    }
+    if app.any_importing() {
+        return Some("Wait for the import to finish, then click Update.".into());
+    }
+    let running = std::env::current_exe().ok()?;
+    swap::program_in_use(&app.options.launcher_dir, &running)
+        .map(|file| format!("{} is running. Close the game first, then click Update.", file.display()))
+}
+
+/// The header's update control: the release page, or the update itself.
+/// Holds no Rust reference to App across the question's message loop.
+unsafe fn update_clicked(hwnd: HWND, state: *mut App) {
+    let available = match &(*state).update {
+        Update::Link => {
+            let app = &mut *state;
+            let url = app.platform.launcher_releases.clone();
+            open_configured(app, url.as_deref(), "The launcher's download page is not set up yet (platform.json: launcher_releases).");
+            return;
+        }
+        Update::Working { .. } => return,
+        Update::Offered(available) => available.clone(),
+    };
+    if let Some(reason) = update_blocked(&*state) {
+        update_notice(&mut *state, &reason, true);
+        return;
+    }
+    let question = format!(
+        "Update to {}?\n\nThe launcher downloads about {} MB, closes, replaces its program files and starts again. Your imports, saves and logs are not touched.",
+        available.version,
+        available.size.div_ceil(1024 * 1024)
+    );
+    if !updater::test_confirmed()
+        && MessageBoxW(hwnd, wide(question).as_ptr(), wide("Update").as_ptr(), MB_YESNO | MB_ICONQUESTION) != IDYES
+    {
+        return;
+    }
+    // The game could have been started from the pad meanwhile.
+    if let Some(reason) = update_blocked(&*state) {
+        update_notice(&mut *state, &reason, true);
+        return;
+    }
+    let app = &mut *state;
+    update_notice(app, &format!("Downloading {}…", available.version), false);
+    update_caption(app, "Downloading 0%");
+    app.update = Update::Working { available: available.clone(), percent: 0 };
+    let install = app.options.launcher_dir.clone();
+    let sender = app.update_sender.clone();
+    std::thread::spawn(move || {
+        let progress = sender.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            updater::prepare(&available, &install, &updater::Policy::for_build(), &mut |done, total| {
+                let _ = progress.send(UpdateEvent::Progress(done, total));
+            })
+        }))
+        .unwrap_or_else(|_| Err("The update stopped unexpectedly.".into()));
+        let _ = sender.send(UpdateEvent::Prepared(result));
+    });
+}
+
+/// The update failed before the swap: the Update button again, and why.
+unsafe fn update_failed(app: &mut App, available: Available, why: &str) {
+    update_caption(app, &format!("Update to {}", available.version));
+    app.update = Update::Offered(available);
+    swap::Staging::of(&app.options.launcher_dir).remove();
+    update_notice(app, &format!("The update did not finish. Nothing was changed; this version still works. {why}"), true);
+}
+
+/// Everything is staged: hand over to the helper and close.
+unsafe fn update_ready(app: &mut App, available: Available) {
+    if let Some(reason) = update_blocked(app) {
+        update_failed(app, available, &reason);
+        return;
+    }
+    let install = app.options.launcher_dir.clone();
+    let data_root = app.options.data_root.clone();
+    match swap::start_helper(&install, &available.version, &data_root) {
+        Ok(()) => {
+            append_log(app, &format!("Update: installing {}; the launcher closes and starts again.\n", available.version));
+            DestroyWindow(app.hwnd);
+        }
+        Err(why) => update_failed(app, available, &why),
+    }
+}
+
+/// What the update jobs sent.
+unsafe fn receive_update(app: &mut App) {
+    while let Ok(event) = app.update_receiver.try_recv() {
+        match event {
+            UpdateEvent::Checked(Ok(Check::Available(available))) => {
+                append_log(app, &format!("Update: {} is available.\n", available.version));
+                update_caption(app, &format!("Update to {}", available.version));
+                app.update = Update::Offered(available);
+            }
+            UpdateEvent::Checked(Ok(Check::UpToDate)) => append_log(app, "Update: this is the latest version.\n"),
+            UpdateEvent::Checked(Ok(Check::NoUpdateFile { tag, why })) => {
+                append_log(app, &format!("Update: {tag} cannot be installed from here ({why}); the link opens its page.\n"));
+            }
+            UpdateEvent::Checked(Err(why)) => append_log(app, &format!("Update check failed: {why}\n")),
+            UpdateEvent::Progress(done, total) => {
+                let now = (done * 100 / total.max(1)) as u32;
+                if let Update::Working { percent, .. } = &mut app.update {
+                    if *percent != now {
+                        *percent = now;
+                        let caption = if done >= total { "Unpacking…".to_owned() } else { format!("Downloading {now}%") };
+                        update_caption(app, &caption);
+                    }
+                }
+            }
+            UpdateEvent::Prepared(result) => {
+                let Update::Working { available, .. } = std::mem::replace(&mut app.update, Update::Link) else { continue };
+                match result {
+                    Ok(()) => update_ready(app, available),
+                    Err(why) => update_failed(app, available, &why),
+                }
+                return;
+            }
+        }
     }
 }
 
@@ -1857,9 +2058,9 @@ unsafe fn update_texts(app: &mut App) {
     } else {
         app.played_seconds()
     };
-    let status = app.slot.status.clone();
+    let (status, status_error) = app.update_notice.clone().unwrap_or((app.slot.status.clone(), app.slot.status_error));
     set_text(app, L_STATUS, &status);
-    let color = if app.slot.status_error { ERROR_TEXT } else { MUTED };
+    let color = if status_error { ERROR_TEXT } else { MUTED };
     if let Some(control) = app.controls.iter_mut().find(|c| c.id == L_STATUS) {
         if let Kind::Label { color: c, .. } = &mut control.kind {
             if *c != color {
@@ -1917,6 +2118,7 @@ unsafe fn set_status(app: &mut App, text: &str, error: bool) {
 
 unsafe fn tick(app: &mut App) {
     receive_events(app);
+    receive_update(app);
     receive_profile(app);
     poll_game(app);
     poll_parked(app);
@@ -2585,6 +2787,17 @@ unsafe fn draw_item(app: &mut App, item: &DRAWITEMSTRUCT) {
                 let color = if hover { rgb(255, 218, 178) } else if app.profile.user.is_some() { rgb(206, 206, 214) } else { GOLD };
                 let flags = DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX | DT_END_ELLIPSIS;
                 label = Some((Font::Body, color, text.clone(), flags));
+            }
+            // The Update button, filling up while it downloads.
+            Kind::Link if id == UPDATE && !matches!(app.update, Update::Link) => {
+                let fill = if pressed { rgb(96, 15, 31) } else if hover { rgb(152, 28, 53) } else { rgb(126, 21, 42) };
+                if let Update::Working { percent, .. } = app.update {
+                    s.rounded(0, 0, w, h, radius, rgb(26, 16, 20), 0.95);
+                    s.rounded(0, 0, w * percent as i32 / 100, h, radius, rgb(126, 21, 42), 1.0);
+                } else {
+                    s.rounded(0, 0, w, h, radius, fill, 1.0);
+                }
+                label = Some((Font::Link, rgb(255, 255, 255), text.clone(), centered));
             }
             Kind::Link => {
                 let color = if hover { rgb(255, 218, 178) } else { GOLD };

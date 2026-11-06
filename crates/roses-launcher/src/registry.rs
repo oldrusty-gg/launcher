@@ -45,6 +45,8 @@ struct PlatformFile {
     name: Option<String>,
     /// The launcher's own release page (newest download).
     launcher_releases: Option<String>,
+    /// GitHub's API address of the latest release (one-click updates).
+    launcher_update_api: Option<String>,
     /// Where to report a problem with the launcher itself.
     launcher_issues: Option<String>,
     website: Option<String>,
@@ -55,13 +57,14 @@ struct PlatformFile {
 pub struct Platform {
     pub name: String,
     pub launcher_releases: Option<String>,
+    pub launcher_update_api: Option<String>,
     pub launcher_issues: Option<String>,
     pub website: Option<String>,
 }
 
 impl Default for Platform {
     fn default() -> Self {
-        Self { name: PLATFORM_NAME_PLACEHOLDER.into(), launcher_releases: None, launcher_issues: None, website: None }
+        Self { name: PLATFORM_NAME_PLACEHOLDER.into(), launcher_releases: None, launcher_update_api: None, launcher_issues: None, website: None }
     }
 }
 
@@ -82,6 +85,13 @@ impl Platform {
             }
             Err(_) => PlatformFile::default(),
         };
+        let launcher_update_api = file.launcher_update_api.filter(|url| {
+            let ok = crate::updater::Policy::for_build().allows_api(url);
+            if !ok {
+                warnings.push(format!("platform.json: launcher_update_api must be an https://{} address; ignored.", crate::updater::API_HOST));
+            }
+            ok
+        });
         let mut link = |what: &str, value: Option<String>| {
             value.filter(|url| {
                 let ok = valid_link(url);
@@ -98,6 +108,7 @@ impl Platform {
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| PLATFORM_NAME_PLACEHOLDER.into()),
             launcher_releases: link("launcher_releases", file.launcher_releases),
+            launcher_update_api,
             launcher_issues: link("launcher_issues", file.launcher_issues),
             website: link("website", file.website),
         };
@@ -768,6 +779,18 @@ mod tests {
         let verified = roses.verify_import(&import, &import.join("game.json")).unwrap();
         assert_eq!(verified.summary, found.summary);
         assert!(roses.verify_import(&data, &data.join("game.json")).is_err(), "the data folder itself is no import");
+    }
+
+    #[test]
+    fn the_update_address_must_be_github_s_api() {
+        let dir = temp("update-api");
+        fs::write(dir.join(PLATFORM_FILE), r#"{"launcher_update_api": "https://api.github.com/repos/oldrusty-gg/rust-yugi-dotr/releases/latest"}"#).unwrap();
+        let (p, w) = Platform::load(&dir);
+        assert_eq!(p.launcher_update_api.as_deref(), Some("https://api.github.com/repos/oldrusty-gg/rust-yugi-dotr/releases/latest"));
+        assert_eq!(w.len(), 0);
+        fs::write(dir.join(PLATFORM_FILE), r#"{"launcher_update_api": "https://example.org/latest"}"#).unwrap();
+        let (p, w) = Platform::load(&dir);
+        assert_eq!((p.launcher_update_api, w.len()), (None, 1));
     }
 
     #[test]
